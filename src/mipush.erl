@@ -457,7 +457,8 @@ transform_message(Message) ->
 
 simplify_to_result(ok) -> ok;
 simplify_to_result([First|Rest]) ->
-  jsx:decode(lists:foldl(fun(B, Acc) -> <<Acc/binary, ", ", B/binary>> end, First, Rest), [return_maps]).
+  jsx:decode(lists:foldl(fun(B, Acc) -> <<Acc/binary, ", ", B/binary>> end, First, Rest), [return_maps]);
+simplify_to_result(Err) -> ok.
 
 format_date({Year, Month, Day})->
   MonthStr =
