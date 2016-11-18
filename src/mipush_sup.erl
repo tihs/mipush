@@ -31,11 +31,11 @@ start_connection(Connection) ->
 %% @hidden
 -spec init(_) ->
   {ok,
-   {{simple_one_for_one, 5, 10},
+   {{simple_one_for_one, 999, 1},
     [{connection, {mipush_connection, start_link, []},
       transient, 5000, worker, [mipush_connection]}]}}.
 init(_) ->
   {ok,
-   {{simple_one_for_one, 5, 10},
+   {{simple_one_for_one, 999, 1},
     [{connection, {mipush_connection, start_link, []},
       transient, 5000, worker, [mipush_connection]}]}}.

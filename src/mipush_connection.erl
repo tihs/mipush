@@ -15,7 +15,7 @@
 -export([send_message/3]).
 
 %% gen_server callback
--export([start_link/1, start_link/2, init/1, handle_call/3,
+-export([start_link/1, start_link/2, init/1,
   handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TIMEOUT, 10*1000).
@@ -24,8 +24,7 @@
 stop(ConnId) -> gen_server:cast(ConnId, stop).
 
 -spec send_message(pid(), mipush:push_msg(), return|no_return) -> ok.
-send_message(ConnId, Msg, no_return) -> gen_server:cast(ConnId, Msg);
-send_message(ConnId, Msg, return) -> gen_server:call(ConnId, Msg).
+send_message(ConnId, Msg, no_return) -> gen_server:cast(ConnId, Msg).
 
 -spec start_link(atom(), apns:connection()) -> {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Name, Connection) ->
@@ -54,38 +53,6 @@ init(#{host := Host, port := Port, timeout :=  Timeout, name := Name,
 %% @hidden
 ssl_opts(SSLOpts) -> [{mode, binary} | SSLOpts].
 
-%% @hidden
--spec handle_call(X, reference(), mipush:connection()) ->
-  {stop, {unknown_request, X}, {unknown_request, X}, mipush:connection()}.
-handle_call(Msg, From, State = #{socket := undefined, expires := Expires, timeout := Timeout,
-  host := Host, port := Port, ssl_opts := SSLOpts}) ->
-  try
-    {ok, Socket} = ssl:connect(Host, Port, ssl_opts(SSLOpts), Timeout),
-    handle_call(Msg, From, State#{socket => Socket, expires_conn => epoch(Expires)})
-  catch
-    _: ErrReason -> {stop, ErrReason}
-  end;
-
-handle_call({Method, MsgType, Query} = Req, From, State = #{socket := Socket, host := Host,
-  android_auth_key := AndroidAuth, ios_auth_key := IOSAuth,
-  android_reg_package_name := AndroidPackageName, ios_bundle_id := IOSBundleId,
-  expires := Expires, expires_conn := ExpiresConn}) ->
-  case ExpiresConn =< epoch(0) of
-    true ->
-      ssl:close(Socket),
-      handle_call(Req, From, State#{socket => undefined});
-    false ->
-      {Auth, NewQuery} = get_auth_and_query(MsgType, AndroidAuth, IOSAuth, AndroidPackageName, IOSBundleId, Query),
-      case do_send_recv_data(Socket, Method, NewQuery, Host, Auth) of
-        {reply, Data} ->
-          NewData = re:replace(Data, <<"\r\n\.+\r\n">>, <<"">>, [global, {return, binary}]),
-          DataList = binary:split(NewData, [<<",">>], [global]),
-          {reply, DataList, State#{expires_conn => epoch(Expires)}};
-        {error, Reason} -> {reply, {error, Reason}, State}
-      end
-  end;
-handle_call(Request, _From, State) ->
-  {stop, {unknown_request, Request}, {unknown_request, Request}, State}.
 
 %% @hidden
 -spec handle_cast(stop | mipush:msg(), mipush:connection()) ->
@@ -96,7 +63,8 @@ handle_cast(Msg, State = #{socket := undefined, expires := Expires, timeout := T
     {ok, Socket} = ssl:connect(Host, Port, ssl_opts(SSLOpts), Timeout),
     handle_cast(Msg, State#{socket => Socket, expires_conn => epoch(Expires)})
   catch
-    _: ErrReason -> {stop, ErrReason}
+    _: ErrReason -> 
+		{noreply, State#{expires_conn => 0}}
   end;
 handle_cast(stop, State) -> {stop, normal, State};
 handle_cast({Method, MsgType, Query}, State = #{socket := Socket, host := Host,
@@ -113,27 +81,27 @@ handle_cast({Method, MsgType, Query}, State = #{socket := Socket, host := Host,
       case ssl:send(Socket, Msg) of
         ok ->
           {noreply, State#{expires_conn => epoch(Expires)}};
-        {error, Reason} -> {stop, {error, Reason}, State}
+        {error, Reason} -> 
+				{noreply, State#{expires_conn => 0}}
       end
   end.
 
 %% @hidden
 -spec handle_info({ssl, tuple(), binary()} | {ssl_closed, tuple()} | X, mipush:connection()) ->
   {noreply, mipush:connection()} | {stop, ssl_closed | {unknown_request, X}, mipush:connection()}.
-handle_info({ssl, SslSocket, Data}, #{socket := SslSocket, err_callback := ErrCallback} = State) ->
+handle_info({ssl, SslSocket, Data}, #{err_callback := ErrCallback} = State) ->
   case binary:split(Data, [<<"\r\n">>], [trim]) of
     [<<"HTTP/1.1 200 OK">>, RestBin] ->
-      case check_result(RestBin, ErrCallback) of
-        ok -> {noreply, State};
-        stop -> {stop, {reply_error, Data}, State}
-      end;
-    _ -> {stop, {reply_error, Data}, State}
-  end;
+      check_result(RestBin, ErrCallback);
+    _ -> ok
+  end,
+  {noreply, State};
 
 handle_info({ssl_closed, SslSocket}, State = #{socket := SslSocket}) ->
   {noreply, State#{socket => undefined}};
 
-handle_info(Request, State) -> {stop, {unknown_request, Request}, State}.
+handle_info(Request, #{err_callback := ErrCallback} = State) -> 
+	{noreply, State}.
 
 %% @hidden
 -spec terminate(term(), mipush:connection()) -> ok.
@@ -142,6 +110,15 @@ terminate(_Reason, _State) -> ok.
 %% @hidden
 -spec code_change(term(), mipush:connection(), term()) -> {ok, mipush:connection()}.
 code_change(_OldVsn, State, _Extra) ->  {ok, State}.
+
+
+
+
+
+
+
+
+
 
 check_result(RestBin, ErrorFun) ->
   ResultList = binary:split(RestBin, [<<"\r\n">>], [global]),
@@ -167,6 +144,19 @@ build_request(Path, QueryParameters) ->
   QueryString = urlencode(QueryParameters),
   Path ++ "?" ++ QueryString.
 
+transform_map_to_list([Map|_Rest] = Maps)when is_map(Map) ->
+  [begin transform_map_to_list(MapTmp) end|| MapTmp <-Maps];
+transform_map_to_list([NotMap|Rest]) ->
+  [NotMap] ++ [begin transform_map_to_list(MapTmp) end|| MapTmp <-Rest];
+transform_map_to_list(#{} = Map) ->
+  lists:foldl(fun({Key, Value}, Acc) ->
+  case is_map(Value) orelse is_list(Value) of
+    true -> [{Key, transform_map_to_list(Value)}|Acc];
+    false -> [{Key, Value}| Acc]
+  end end, [], maps:to_list(Map));
+transform_map_to_list(Value) ->
+  Value.
+
 %% ===================================================================
 %% INTERNAL FUNCTION
 %% ===================================================================
@@ -183,52 +173,13 @@ joint_req(Method, Query, Auth, Host) ->
       ["Content-Length", ": ", "0", "\r\n"]],
     "\r\n"].
 
-do_send_recv_data(Socket, Method, Query, Host, Auth) ->
-  Msg = joint_req(Method, Query, Auth, Host),
-  ssl:setopts(Socket, [{active, false}]),
-  case ssl:send(Socket, Msg) of
-    ok ->
-      case ssl:recv(Socket, 0, ?TIMEOUT) of
-        {ok, Data} ->
-          Result =
-            case binary:split(Data, [<<"\r\n">>], [global]) of
-              [<<"HTTP/1.1 200 OK">>|Rests] ->
-                case lists:member(<<"Transfer-Encoding: chunked">>, Rests) of
-                  false -> {reply, lists:last(Rests)};
-                  true ->
-                    Rest = receive_chunked_data(Socket, <<>>),
-                    {reply, <<(lists:last(Rests))/binary, Rest/binary>>}
-                end;
-              Err -> {error, Err}
-            end,
-          ssl:setopts(Socket, [{active, true}]),
-          Result;
-        {error, _Reason} = Err ->
-          ssl:setopts(Socket, [{active, true}]),
-          Err
-      end;
-    {error, _Reason} = Err ->
-      ssl:setopts(Socket, [{active, true}]),
-      Err
-  end.
-
-receive_chunked_data(Socket, Acc) ->
-  case ssl:recv(Socket, 0 , ?TIMEOUT) of
-    {ok, SocketData} ->
-      List = binary:split(SocketData, [<<"\r\n">>], [global]),
-      case lists:member(<<"0">>, List) of
-        true ->
-          [Result |_] = binary:split(SocketData, [<<"]}">>]),
-          <<Acc/binary, Result/binary>>;
-        false -> receive_chunked_data(Socket, <<Acc/binary, SocketData/binary>>)
-      end;
-    {error, _Error} = Err -> Err
-  end.
 
 %% second
 epoch(ExpireTime) ->
   {M, S, _} = os:timestamp(),
   M * 1000000 + S + ExpireTime.
+
+
 
 -define(PERCENT, 37).  % $\%
 -define(FULLSTOP, 46). % $\.
@@ -245,18 +196,6 @@ epoch(ExpireTime) ->
 -define(FLOAT_BIAS, 1022).
 -define(BIG_POW, 4503599627370496).
 
-transform_map_to_list([Map|_Rest] = Maps)when is_map(Map) ->
-  [begin transform_map_to_list(MapTmp) end|| MapTmp <-Maps];
-transform_map_to_list([NotMap|Rest]) ->
-  [NotMap] ++ [begin transform_map_to_list(MapTmp) end|| MapTmp <-Rest];
-transform_map_to_list(#{} = Map) ->
-  lists:foldl(fun({Key, Value}, Acc) ->
-  case is_map(Value) orelse is_list(Value) of
-    true -> [{Key, transform_map_to_list(Value)}|Acc];
-    false -> [{Key, Value}| Acc]
-  end end, [], maps:to_list(Map));
-transform_map_to_list(Value) ->
-  Value.
 
 urlencode(Props) ->
   Pairs = lists:foldr(
