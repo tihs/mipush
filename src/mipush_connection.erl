@@ -90,6 +90,7 @@ handle_cast({Method, MsgType, Query}, State = #{socket := Socket, host := Host,
 -spec handle_info({ssl, tuple(), binary()} | {ssl_closed, tuple()} | X, mipush:connection()) ->
   {noreply, mipush:connection()} | {stop, ssl_closed | {unknown_request, X}, mipush:connection()}.
 handle_info({ssl, SslSocket, Data}, #{err_callback := ErrCallback} = State) ->
+  %%io:format("\r\n Data: ~s \r\n", [Data]),
   case binary:split(Data, [<<"\r\n">>], [trim]) of
     [<<"HTTP/1.1 200 OK">>, RestBin] ->
       check_result(RestBin, ErrCallback);
@@ -100,7 +101,7 @@ handle_info({ssl, SslSocket, Data}, #{err_callback := ErrCallback} = State) ->
 handle_info({ssl_closed, SslSocket}, State = #{socket := SslSocket}) ->
   {noreply, State#{socket => undefined}};
 
-handle_info(Request, #{err_callback := ErrCallback} = State) -> 
+handle_info(Request, State) -> 
 	{noreply, State}.
 
 %% @hidden
